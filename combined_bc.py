@@ -7,6 +7,8 @@ from resnet_model import Model
 import cv2
 import os
 from sys import stdout
+import signal
+import sys
 
 
 """
@@ -410,23 +412,21 @@ def test_rollout(net, sess):
     from perls_robot_interface_ros.sawyer_gym_env import RoboTurkSawyerEnv
     import time
 
+    ctrl_freq = 5.
     env = RoboTurkSawyerEnv()
 
     obs = env.reset()
 
     a = raw_input('Ready')
 
-    obs = env.get_observation()
-
     grasp = False
-
+    prev_time = time.time()
     for _ in range(5000):
-        import matplotlib.pyplot as plt
-
+        # import matplotlib.pyplot as plt
         #print(obs.shape)
         #plt.imshow(obs[0])
 
-        s = time.time()
+        obs = env.get_observation()
         action = net.eval(obs, sess)
 
         if np.ravel(action)[-1] > 0.5:
@@ -435,11 +435,8 @@ def test_rollout(net, sess):
         else:
             action = np.concatenate([np.ravel(action)[:-1], [0]])
         # print(time.time() - s)
-        #print(env.unwrapped.robot.robot_arm.q - np.ravel(action)[:-1])
         #exit()
         #plt.show()    
-
-        # env.unwrapped.robot.robot_arm.goto_q(np.ravel(action)[:-1])
 
         env.step(action)
 
@@ -448,12 +445,18 @@ def test_rollout(net, sess):
         else:
             env.unwrapped.robot.robot_arm.close_gripper()
 
+        # Enforce Control Frequency
+        while(1/(time.time()-prev_time) > ctrl_freq+.01):
+            NotImplemented
+        print("control rate: {} hz".format(1/(time.time()-prev_time)))
+        prev_time=time.time()
 
-        obs = env.get_observation()
 
-
-
-
+def signal_handler(signal, frame):
+    """
+    Exits on ctrl+C
+    """
+    sys.exit(0)
 
 
 if __name__ == '__main__':
@@ -467,6 +470,8 @@ if __name__ == '__main__':
     parser.add_argument('--fused', action='store_true')
     args = parser.parse_args()
 
+    signal.signal(signal.SIGINT, signal_handler)  # Handles ctrl+C
+
     if args.test_rollout:
         with tf.Session() as sess:
             net = Network('../processed_bc_data/', training=False, proprio=args.proprio, image=args.image, fused=args.fused)
@@ -479,6 +484,4 @@ if __name__ == '__main__':
 
     net = Network('../processed_bc_data/', proprio=args.proprio, image=args.image, fused=args.fused)
     
-    
     net.train(args.restore_path)
-
