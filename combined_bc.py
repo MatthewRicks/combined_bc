@@ -9,7 +9,7 @@ import os
 from sys import stdout
 import signal
 import sys
-
+import subprocess
 
 """
 /robot/joint_states
@@ -155,7 +155,7 @@ class DataReader:
                 self.obs_std = np.std(obs_flat[:100000000,:])
 
         if self.proprio or self.fused:
-            self.low_dim_obs_shape = np.squeeze(dataset['low_dim_obs'][0]).shape
+            self.low_dim_obs_shape = np.squeeze(dataset['low_dim_obs'][0]).shape  #(7,)
 
     def iterator(self, mode, batch_size):
         assert mode in ['train', 'valid']
@@ -283,6 +283,7 @@ class Network:
         optim = tf.train.AdamOptimizer(learning_rate=5.e-5)
         self.train_op = optim.minimize(self.loss)
 
+
         with tf.device('/cpu:0'):
             tf.summary.scalar('joint_loss', joint_loss)
 
@@ -298,8 +299,9 @@ class Network:
 
             self.saver = tf.train.Saver()
             self.saver_best = tf.train.Saver(tf.global_variables(), max_to_keep=1)
-            self.writer = tf.summary.FileWriter('./logs/run_' + str(n_runs))
-            self.summary_op = tf.summary.merge_all()
+            if self.training:
+                self.writer = tf.summary.FileWriter('./logs/run_' + str(n_runs))
+                self.summary_op = tf.summary.merge_all()
 
     def eval(self, ob, sess):
         if self.image:
@@ -313,7 +315,7 @@ class Network:
 
         elif self.proprio:
             return sess.run(self.outputs, feed_dict={
-                self.obs_placeholder_low_dim: np.reshape(ob[1],(1,7))
+                self.obs_placeholder_low_dim: np.reshape(ob[1],(1,self.dataset.low_dim_obs_shape[0]))
                 })
 
         elif self.fused:
@@ -322,12 +324,14 @@ class Network:
             scaled_img = np.maximum(np.minimum(scaled_img, 5), -5)
             return sess.run(self.outputs, feed_dict={
                 self.obs_placeholder: scaled_img,
-                self.obs_placeholder_low_dim: np.reshape(ob[1], (1,7))
+                self.obs_placeholder_low_dim: np.reshape(ob[1], (1,self.dataset.low_dim_obs_shape[0]))
                 })
 
 
     def train(self, restore_path):
-        with tf.Session() as sess:
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth =True
+        with tf.Session(config=config) as sess:
             cntr = 0
             best_valid_loss = 1000
             sess.run(tf.global_variables_initializer())
@@ -399,7 +403,7 @@ class Network:
                     
                 print('\tvalidation complete with loss: ' + str(float(int(loss * 10000)) / 10000.))
 
-                if cntr % 1000 == 500 and self.proprio:
+                if cntr % 100 == 50 and self.proprio:
                     self.saver.save(sess, './checkpoints/ckpt.ckpt', global_step=cntr)
                 elif cntr % 100 == 50 and self.image:
                     self.saver.save(sess, './checkpoints/ckpt.ckpt', global_step=cntr)
@@ -412,9 +416,18 @@ def test_rollout(net, sess):
     from perls_robot_interface_ros.sawyer_gym_env import RoboTurkSawyerEnv
     import time
 
-    ctrl_freq = 5.
+    ctrl_freq = 20
     env = RoboTurkSawyerEnv()
+    def signal_handler(signal, frame):
+        """
+        Exits on ctrl+C
+        """
+        # subprocess.call(['rostopic', 'pub', '/sawyer/reset', 'std_msgs/Bool', '\"data: True\"'])
+        env.shutdown()
+        time.sleep(.5)
+        sys.exit(0)
 
+    signal.signal(signal.SIGINT, signal_handler)  # Handles ctrl+C
     obs = env.reset()
 
     a = raw_input('Ready')
@@ -427,7 +440,11 @@ def test_rollout(net, sess):
         #plt.imshow(obs[0])
 
         obs = env.get_observation()
+
+        start = time.time()
         action = net.eval(obs, sess)
+        # print('Forward prop ' + str(time.time() - start))
+        # print(action)
 
         if np.ravel(action)[-1] > 0.5:
             action = np.concatenate([np.ravel(action)[:-1], [1]])
@@ -437,26 +454,27 @@ def test_rollout(net, sess):
         # print(time.time() - s)
         #exit()
         #plt.show()    
-
+        start = time.time()
         env.step(action)
+        # print('Env step ' + str(time.time() - start))
 
-        if np.ravel(action)[-1] == 0:
-            env.unwrapped.robot.robot_arm.open_gripper()
-        else:
-            env.unwrapped.robot.robot_arm.close_gripper()
+        #if np.ravel(action)[-1] == 0:
+        #    env.unwrapped.robot.robot_arm.open_gripper()
+        #else:
+        #    env.unwrapped.robot.robot_arm.close_gripper()
 
         # Enforce Control Frequency
         while(1/(time.time()-prev_time) > ctrl_freq+.01):
             NotImplemented
-        print("control rate: {} hz".format(1/(time.time()-prev_time)))
+        # print("control rate: {} hz".format(1/(time.time()-prev_time)))
         prev_time=time.time()
 
+    action[-1] = 0
 
-def signal_handler(signal, frame):
-    """
-    Exits on ctrl+C
-    """
-    sys.exit(0)
+    env.step(action)
+
+
+
 
 
 if __name__ == '__main__':
@@ -470,10 +488,10 @@ if __name__ == '__main__':
     parser.add_argument('--fused', action='store_true')
     args = parser.parse_args()
 
-    signal.signal(signal.SIGINT, signal_handler)  # Handles ctrl+C
-
     if args.test_rollout:
-        with tf.Session() as sess:
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth =True
+        with tf.Session(config=config) as sess:
             net = Network('../processed_bc_data/', training=False, proprio=args.proprio, image=args.image, fused=args.fused)
 
             sess.run(tf.global_variables_initializer())
