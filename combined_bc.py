@@ -200,7 +200,7 @@ class Network:
         self.batch_size = batch_size
         self.training = training
 
-        with tf.device('/gpu:0'):
+        with tf.device('/cpu:0'):
             self.build_network()
 
     def build_network(self):
@@ -451,6 +451,8 @@ def test_rollout(net, sess):
             grasp = True
         else:
             action = np.concatenate([np.ravel(action)[:-1], [0]])
+
+        print(action)
         # print(time.time() - s)
         #exit()
         #plt.show()    
