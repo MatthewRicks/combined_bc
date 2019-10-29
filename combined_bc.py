@@ -10,6 +10,7 @@ from sys import stdout
 import signal
 import sys
 import subprocess
+import RobotTeleop.utils as U
 
 """
 /robot/joint_states
@@ -341,10 +342,12 @@ class Network:
 
                 for train_batch in self.dataset.iterator('train', self.batch_size):
                     if self.proprio:
+
+                        observations, actions = perturb(train_batch[0], train_batch[2])
                         summ, loss, _ = sess.run([self.summary_op, self.loss, self.train_op],
                                                  feed_dict={
-                                                     self.obs_placeholder_low_dim: train_batch[0],
-                                                     self.gt_placeholder: train_batch[2]
+                                                     self.obs_placeholder_low_dim: observations,
+                                                     self.gt_placeholder: actions
                                                  }
                         )
                     elif self.image:
@@ -436,15 +439,12 @@ def test_rollout(net, sess):
     prev_time = time.time()
     for _ in range(5000):
         # import matplotlib.pyplot as plt
-        #print(obs.shape)
         #plt.imshow(obs[0])
 
         obs = env.get_observation()
 
         start = time.time()
         action = net.eval(obs, sess)
-        # print('Forward prop ' + str(time.time() - start))
-        # print(action)
 
         if np.ravel(action)[-1] > 0.5:
             action = np.concatenate([np.ravel(action)[:-1], [1]])
@@ -452,18 +452,13 @@ def test_rollout(net, sess):
         else:
             action = np.concatenate([np.ravel(action)[:-1], [0]])
 
-        print(action)
+        # print(action)
         # print(time.time() - s)
         #exit()
         #plt.show()    
         start = time.time()
         env.step(action)
         # print('Env step ' + str(time.time() - start))
-
-        #if np.ravel(action)[-1] == 0:
-        #    env.unwrapped.robot.robot_arm.open_gripper()
-        #else:
-        #    env.unwrapped.robot.robot_arm.close_gripper()
 
         # Enforce Control Frequency
         while(1/(time.time()-prev_time) > ctrl_freq+.01):
@@ -475,6 +470,31 @@ def test_rollout(net, sess):
 
     env.step(action)
 
+def perturb(observation, action):
+    N = observation.shape[0]
+    # pos_pertubation = np.random.rand(N, 3)/500 - .001  # up to 1mm random pertubation
+    # ori_pertubation = np.random.rand(N, 3)/5 -.1  # up to .1 rad pertubation (euler)
+    # pert = np.hstack([pos_pertubation, ori_pertubation])
+    new_observation = np.copy(observation)
+    new_action = np.copy(action)
+    for i in range(N):
+        pert = np.random.multivariate_normal(np.zeros(6), np.diag([.001, .001, .001, .04, .04, .04]))
+        new_action[i,:3] += pert[:3]
+        new_action[i,3:6] += pert[3:]
+        new_action[i,3:6] = (new_action[i,3:6] + np.pi) % (2 * np.pi ) - np.pi
+
+        old_eul = U.quat2euler(observation[i,3:7])
+        eul = old_eul - pert[3:]
+        old_eul = (old_eul + np.pi) % (2 * np.pi ) - np.pi
+        eul = (eul + np.pi) % (2 * np.pi ) - np.pi
+        
+        quat = U.euler2quat(eul)
+        new_observation[i][3:7] = quat
+        new_observation[i,:3] -= pert[:3]
+
+        # print(new_observation)
+
+    return new_observation, new_action
 
 
 
