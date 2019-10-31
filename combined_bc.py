@@ -201,7 +201,7 @@ class Network:
         self.batch_size = batch_size
         self.training = training
 
-        with tf.device('/cpu:0'):
+        with tf.device('/gpu:0'):
             self.build_network()
 
     def build_network(self):
@@ -285,7 +285,7 @@ class Network:
         self.train_op = optim.minimize(self.loss)
 
 
-        with tf.device('/cpu:0'):
+        with tf.device('/gpu:0'):
             tf.summary.scalar('joint_loss', joint_loss)
 
             tf.summary.scalar('grasp_loss', grasp_loss)
@@ -330,7 +330,7 @@ class Network:
 
 
     def train(self, restore_path):
-        config = tf.ConfigProto()
+        config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=True)
         config.gpu_options.allow_growth =True
         with tf.Session(config=config) as sess:
             cntr = 0
@@ -408,9 +408,9 @@ class Network:
 
                 if cntr % 100 == 50 and self.proprio:
                     self.saver.save(sess, './checkpoints/ckpt.ckpt', global_step=cntr)
-                elif cntr % 100 == 50 and self.image:
+                elif cntr % 10 == 5 and self.image:
                     self.saver.save(sess, './checkpoints/ckpt.ckpt', global_step=cntr)
-                elif cntr % 100 == 50 and self.fused:
+                elif cntr % 10 == 5 and self.fused:
                     self.saver.save(sess, './checkpoints/ckpt.ckpt', global_step=cntr)
                 cntr += 1
 
@@ -511,8 +511,9 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.test_rollout:
-        config = tf.ConfigProto()
+        config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=True)
         config.gpu_options.allow_growth =True
+        
         with tf.Session(config=config) as sess:
             net = Network('../processed_bc_data/', training=False, proprio=args.proprio, image=args.image, fused=args.fused)
 
