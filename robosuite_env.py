@@ -29,6 +29,7 @@ import time
 import argparse
 import subprocess
 import signal
+import time
 
 try:
     from .python_bridge import PythonBridge
@@ -40,6 +41,9 @@ RESET = -1000
 SUCCESS = -10000
 GET_POSE = -51515
 CLOSE = -10
+
+PORT_HIGH = 7500
+PORT_LOW = 7000
 
 class RealSawyerLift(object):
 
@@ -62,8 +66,9 @@ class RealSawyerLift(object):
         self.sawyer_interface = None
         self.camera = None
 
-        self.port1 = 7020
-        self.port2 = 7021
+        np.random.seed(time.time())
+        self.port1 = np.random.choice(range(PORT_LOW, PORT_HIGH))
+        self.port2 = self.port1 + 1
 
         self.config = make_config('RealSawyerDemoServerConfig')
         self.config.infer_settings()
