@@ -79,7 +79,6 @@ class RealSawyerLift(object):
         """
         if self.is_py2 and self.controller=='opspace':
             self.osc_controller.reset_flag.publish(True)
-        
 
     def send(self, data):
         # print('DATA SIZE ***************', sys.getsizeof(data))
@@ -130,8 +129,9 @@ class RealSawyerLift(object):
         self.timestep = 0
 
         if self.is_py2:
-            self.sawyer_interface.reset()
             self.sawyer_interface.open_gripper()
+            self.sawyer_interface.reset()
+            time.sleep(1)
             # Successful Reset
             self.send(array('f', np.array([-10000.] * self.dof).tolist()))
             return
@@ -198,10 +198,10 @@ class RealSawyerLift(object):
             elif self.controller == 'opspace':
                 self.osc_controller.send_action(action[:-1])
 
-            if action[-1] > 0.25 and not self.gripper_state:
+            if abs(action[-1]) > 0.25 and not self.gripper_state:
                 self.sawyer_interface.close_gripper()
                 self.gripper_state = 1 
-            elif not action[-1] < 0.25 and self.gripper_state:
+            elif abs(action[-1]) < 0.25 and self.gripper_state:
                 self.sawyer_interface.open_gripper()
                 self.gripper_state = 0
 
@@ -228,7 +228,7 @@ class RealSawyerLift(object):
         action = self._pre_action(action)
 
         self._apply_action(action)
-        
+        # print(action)
         end_time = time.time() + self.control_timestep
         while time.time() < end_time:
             NotImplemented
@@ -245,6 +245,7 @@ class RealSawyerLift(object):
 
     def close(self):
         if self.is_py2:
+            self.sawyer_interface.open_gripper()
             self.sawyer_interface.reset()
         else:
             self.camera.release()
@@ -358,9 +359,11 @@ if __name__ == '__main__':
             config.train.data=args.batch
             policy = LatentMotorPlansAlgo(config)
             policy._prepare_for_test_rollouts(args.policy)
-            env = RealSawyerLift()
 
-            goal_inds = list(range(len(states_seq)))[self.config.train.seq_length :: self.config.train.seq_length]
+            obs_seq, _, _, _, _, _, _ = policy.memory.get_trajectory_at_index(-1)
+            goal_inds = list(range(len(obs_seq)))[policy.config.train.seq_length :: policy.config.train.seq_length]
+            goal_inds.append(-1)
+            env = RealSawyerLift()
 
         else:
             env = RCANRealSawyerLift(restore_rcan, rcan_kwargs, env_kwargs)
@@ -373,14 +376,25 @@ if __name__ == '__main__':
 
         obs = env.reset()
         # print(obs)
-        while True:
+        run_loop = True
+        while run_loop:
             #for n in range(20):
             if args.algo=='bc':
                 obs, rew, done, info = env.step(policy.forward(obs['proprio']))
 
             elif args.algo=='lmp':
-                obs, rew, done, info = env.step(policy.forward(obs['proprio']))
+                for index in goal_inds:
+                    goal = obs_seq[index]
+                    for i in range(policy.config.train.seq_length):
+                        t_obs = torch.from_numpy(np.expand_dims(obs['proprio'], axis=0)).float().to(policy.device)
+                        t_goal = torch.from_numpy(np.expand_dims(goal, axis=0)).float().to(policy.device)
 
+                        policy.start_control_loop(t_obs,t_goal)
+                        action = policy.act(obs=t_obs, goals=t_goal).cpu().detach().numpy().squeeze()
+                        print('action: {}'.format(action))
+                        obs, rew, done, info = env.step(action)
+
+                run_loop = False
             else:
                 
                 print(obs)
@@ -425,7 +439,6 @@ if __name__ == '__main__':
                 """
             #cv2.imshow('obs2', obs['pixel']['camera0'])
             #cv2.waitKey()
-
         env.close()
 
     def py2main():
