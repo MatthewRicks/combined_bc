@@ -248,7 +248,7 @@ class Network:
                 resnet_size=34,
                 bottleneck=False,
                 num_classes=self.gt_placeholder.shape[-1],
-                num_filters=64,
+                num_filters=32,
                 kernel_size=7,
                 conv_stride=1,
                 first_pool_size=2,
@@ -351,9 +351,10 @@ class Network:
                                                  }
                         )
                     elif self.image:
+                        observations = perturb_image(train_batch[1])
                         summ, loss, _ = sess.run([self.summary_op, self.loss, self.train_op],
                                                  feed_dict={
-                                                     self.obs_placeholder: train_batch[1],
+                                                     self.obs_placeholder: observations,
                                                      self.gt_placeholder: train_batch[2]
                                                  }
                         )
@@ -496,9 +497,15 @@ def perturb(observation, action):
 
     return new_observation, new_action
 
+def perturb_image(observation):
+    N = observation.shape[0]
+    new_observation = np.copy(observation)
+    scalers = np.random.uniform(.8, 1.2, N)
 
+    for i in range(N):
+        new_observation[i] = observation[i]*scalers[i]
 
-
+    return new_observation
 if __name__ == '__main__':
     import argparse
 

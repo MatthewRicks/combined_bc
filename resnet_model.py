@@ -518,10 +518,8 @@ class Model(object):
       inputs = tf.squeeze(inputs, axes)
       inputs = tf.layers.dense(inputs=inputs, units=self.num_classes)
       """
-      # print(inputs)
       inputs = tf.contrib.layers.spatial_softmax(inputs)
-      # print(inputs)
-      # exit()
 
-      inputs = tf.identity(inputs, 'final_dense')
+      # inputs = tf.identity(inputs, 'final_dense')
+      inputs = tf.layers.dense(inputs=inputs, units=self.num_classes)
       return inputs
