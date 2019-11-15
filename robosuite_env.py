@@ -36,6 +36,8 @@ try:
 except:
     from python_bridge import PythonBridge
 
+from video_capture import VideoCapture
+
 
 RESET = -1000
 SUCCESS = -10000
@@ -48,10 +50,14 @@ PORT_LOW = 7000
 class RealSawyerLift(object):
 
     def __init__(self, control_freq=10, horizon=1000, camera_height=256,
-                 camera_width=256):
+                 camera_width=256, use_image=False, use_proprio=False):
 
         self.ctrl_freq = control_freq
         self.t = horizon
+        self.use_image = use_image
+        self.use_proprio = use_proprio
+
+        assert self.use_image or self.use_proprio, 'One of use_image and use_proprio must be set'
         # self.controller = controller
         self.cam_dim = (camera_height, camera_width)
 
@@ -124,7 +130,7 @@ class RealSawyerLift(object):
             self.recv()
 
     def _setup_camera(self):
-        self.camera = cv2.VideoCapture(0)
+        self.camera = VideoCapture(0, self.cam_dim)
 
     def _setup_robot(self):
         self.osc_robot = make_robot(self.config.robot.type, config=self.config)
@@ -152,25 +158,24 @@ class RealSawyerLift(object):
 
         return self._get_observation()
 
-    def _process_image(self, img):
-        h, w, _ = img.shape
-        new_w = int( float(w) / float(h) * self.cam_dim[0])
-        new_shape = (new_w, self.cam_dim[0])
-
-        resized = cv2.resize(img, new_shape, cv2.INTER_AREA)
-
-        center = new_w // 2
-        left = center - self.cam_dim[1] // 2 # assume for now that this is multiple of 2
-        right = center + self.cam_dim[1] // 2
-
-        img = resized[:,left:right,:]
-        img = np.array([img])
-        img = np.transpose(img, (0, 3, 1, 2))
-        return img
+    #def _process_image(self, img):
+    #    h, w, _ = img.shape
+    #    new_w = int( float(w) / float(h) * self.cam_dim[0])
+    #    new_shape = (new_w, self.cam_dim[0])
+    #
+    #    resized = cv2.resize(img, new_shape, cv2.INTER_AREA)
+    #
+    #    center = new_w // 2
+    #    left = center - self.cam_dim[1] // 2 # assume for now that this is multiple of 2
+    #    right = center + self.cam_dim[1] // 2
+    #
+    #    img = resized[:,left:right,:]
+    #    img = np.array([img])
+    #    img = np.transpose(img, (0, 3, 1, 2))
+    #    return img
 
     def _get_image(self):
-        for _ in range(30):
-            ret, frame = self.camera.read()
+        ret, frame = self.camera.read()
         if not ret:
             raise RuntimeError('camera read failed')
         return frame
@@ -185,9 +190,11 @@ class RealSawyerLift(object):
     def _get_observation(self):
         start = time.time()
         di = {}
-        # img = self._get_image()
-        # di['image'] = self._process_image(img)
-        di['proprio'] = self._get_proprio()
+        if self.use_image:
+            img = self._get_image()
+            di['image'] = img
+        if self.use_proprio:
+            di['proprio'] = self._get_proprio()
         # print('Observation retrieval time: {}'.format(time.time()-start))
         return di
 
@@ -315,6 +322,8 @@ if __name__ == '__main__':
     parser.add_argument('--algo', type=str)
     parser.add_argument('--policy', type=str)
     parser.add_argument('--batch', type=str, default='/home/robot/Desktop/processed_bc_data/output.hdf5')
+    parser.add_argument('--proprio', action='store_true')
+    parser.add_argument('--image', action='store_true')
     args = parser.parse_args()
 
 
@@ -359,7 +368,7 @@ if __name__ == '__main__':
             config.train.data = args.batch
             policy = BehavioralCloningAlgo(config)
             policy._prepare_for_test_rollouts(args.policy)
-            env = RealSawyerLift()
+            env = RealSawyerLift(use_image=args.image, use_proprio=args.proprio)
 
 
         elif args.algo == "lmp":
@@ -368,12 +377,13 @@ if __name__ == '__main__':
             config.train.data=args.batch
             policy = LatentMotorPlansAlgo(config)
             policy._prepare_for_test_rollouts(args.policy)
-            env = RealSawyerLift()
+            env = RealSawyerLift(use_image=args.image, use_proprio=args.proprio)
 
             goal_inds = list(range(len(states_seq)))[self.config.train.seq_length :: self.config.train.seq_length]
 
         else:
-            env = RCANRealSawyerLift(restore_rcan, rcan_kwargs, env_kwargs)
+            env = RCANRealSawyerLift(restore_rcan, rcan_kwargs, env_kwargs={'use_image':args.image,
+                                                                            'use_proprio':args.proprio})
 
             config = PPO_DEFAULT_ENV_CONFIG
             config.pixel_input = True
