@@ -2,19 +2,24 @@ import sys
 
 try:
     from perls_robot_interface_ros import SawyerInterface
-    from RobotTeleop.controllers import OpSpaceController
-    from RobotTeleop.configs import RealSawyerDemoServerConfig
-    from RobotTeleop.robots import RealSawyerRobot
+    # from RobotTeleop.controllers import OpSpaceController
+    # from RobotTeleop.configs import RealSawyerDemoServerConfig
+    # from RobotTeleop.robots import RealSawyerRobot
+    from RobotTeleop import make_robot, make_controller, make_config
     print('imported')
 except ImportError:
+    from RobotTeleop import make_config
     import cv2
     print(sys.version_info)
-    # from surreal.env.wrapper import RobosuiteWrapper
-    # from surreal.main.ppo_configs import *
     from batchRL.algo import *
     from batchRL.config import *
     import torch
-    # from surreal.main.rollout import restore_agent, restore_model, restore_config
+    try:
+        from surreal.main.rollout import restore_agent, restore_model, restore_config
+        from surreal.env.wrapper import RobosuiteWrapper
+        from surreal.main.ppo_configs import *
+    except ImportError:
+        print('Unable to import surreal. Hopefully you dont need it!')
     print('Hopefully this is py3')
 
 from array import array
@@ -23,6 +28,7 @@ import numpy as np
 import time
 import argparse
 import subprocess
+import signal
 
 try:
     from .python_bridge import PythonBridge
@@ -33,11 +39,11 @@ except:
 class RealSawyerLift(object):
 
     def __init__(self, control_freq=10, horizon=1000, camera_height=256,
-                 camera_width=256, controller='velocity'):
+                 camera_width=256):
 
         self.ctrl_freq = control_freq
         self.t = horizon
-        self.controller = controller
+        # self.controller = controller
         self.cam_dim = (camera_height, camera_width)
 
         self.control_timestep = 1. / self.ctrl_freq
@@ -48,12 +54,16 @@ class RealSawyerLift(object):
         self.has_object_obs = False
         self.data_size = 96000
         
-        self.robot = None
+        self.sawyer_interface = None
         self.camera = None
 
         self.port1 = 7020
         self.port2 = 7021
-        
+
+        self.config = make_config('RealSawyerDemoServerConfig')
+        self.config.infer_settings()
+
+        self.controller = self.config.controller.mode
         
         if self.is_py2:
             self.bridge = PythonBridge(self.port1, self.port2, self.data_size)
@@ -62,6 +72,14 @@ class RealSawyerLift(object):
         else:
             self.bridge = PythonBridge(self.port2, self.port1, self.data_size)
             self._setup_camera()
+
+    def signal_handler(self, signal, frame):
+        """
+        Exits on ctrl+C
+        """
+        if self.is_py2 and self.controller=='opspace':
+            self.osc_controller.reset_flag.publish(True)
+        
 
     def send(self, data):
         # print('DATA SIZE ***************', sys.getsizeof(data))
@@ -75,14 +93,15 @@ class RealSawyerLift(object):
         action.fromstring(data)
         data = np.array(action)
         
-        print('Recieved', data)
+        # print('Recieved', data)
         if data[0] == -1000 and data[3] == -1000 and data[-1] == -1000:
             self.reset()
         elif data[0] == -10000 and data[3] == -10000 and data[-1] == -10000:
             return True
         elif data[0] == -51515 and data[3] == -51515 and data[-1] == -51515:
-            pose = self.robot.ee_pose
-            pose.append(self.robot._gripper.get_position())
+            pose = self.sawyer_interface.ee_pose
+            pose = self.sawyer_interface.pose_endpoint_transform(pose, des_endpoint='right_hand', curr_endpoint='right_gripper_tip')
+            pose.append(self.sawyer_interface._gripper.get_position())
             self.send(array('f', pose))
         elif data[0] == -10 and data[3] == -10 and data[-1] == -10:
             self.close()
@@ -98,21 +117,21 @@ class RealSawyerLift(object):
         self.camera = cv2.VideoCapture(0)
         
     def _setup_robot(self):
-        if self.controller == 'osc':
-            self.config = RealSawyerDemoServerConfig
-            self.osc_robot = RealSawyerRobot(self.config)
-            self.robot = self.osc_robot.robot_arm
-            self.osc_controller = OpSpaceController(self.osc_robot, self.config)
+        self.osc_robot = make_robot(self.config.robot.type, config=self.config)
+        self.osc_controller = make_controller(self.config.controller.type, robot=self.osc_robot, config=self.config)
+        self.osc_controller.reset()
+        self.osc_controller.sync_state()
 
-        else:
-            self.robot = SawyerInterface(use_moveit=False, use_safenet=True)
+        self.sawyer_interface = self.osc_robot.robot_arm
+
+        signal.signal(signal.SIGINT, self.signal_handler)  # Handles ctrl+C
 
     def reset(self):
         self.timestep = 0
 
         if self.is_py2:
-            self.robot.reset()
-            self.robot.open_gripper()
+            self.sawyer_interface.reset()
+            self.sawyer_interface.open_gripper()
             # Successful Reset
             self.send(array('f', np.array([-10000.] * self.dof).tolist()))
             return
@@ -159,7 +178,7 @@ class RealSawyerLift(object):
         # img = self._get_image()
         # di['image'] = self._process_image(img)
         di['proprio'] = self._get_proprio()
-        print('Observation retrieval time: {}'.format(time.time()-start))
+        # print('Observation retrieval time: {}'.format(time.time()-start))
         return di
     
     def _pre_action(self, action):
@@ -168,23 +187,24 @@ class RealSawyerLift(object):
             # TODO: there is linear interpolation being done between the velocity limits
             #       in sim, do we have something similar to that on the real robot?
             action = np.clip(action, -0.3, 0.3)
-        else:
-            action = np.hstack([action, 0.0])
 
         return action   
         
     def _apply_action(self, action):
         if self.is_py2:
             if self.controller == 'velocity':
-                self.robot.dq = action[:-1]
-                if action[-1] > 0.25 and not self.gripper_state:
-                    self.robot.close_gripper()
-                    self.gripper_state = 1 
-                elif not action[-1] < 0.25 and self.gripper_state:
-                    self.robot.open_gripper()
-                    self.gripper_state = 0
-            elif self.controller == 'osc':
+                self.sawyer_interface.dq = action[:-1]
+                
+            elif self.controller == 'opspace':
                 self.osc_controller.send_action(action[:-1])
+
+            if action[-1] > 0.25 and not self.gripper_state:
+                self.sawyer_interface.close_gripper()
+                self.gripper_state = 1 
+            elif not action[-1] < 0.25 and self.gripper_state:
+                self.sawyer_interface.open_gripper()
+                self.gripper_state = 0
+
         else:
             # send to py2
             self.send(bytes(array('f', action.tolist())))
@@ -225,7 +245,7 @@ class RealSawyerLift(object):
 
     def close(self):
         if self.is_py2:
-            self.robot.reset()
+            self.sawyer_interface.reset()
         else:
             self.camera.release()
             self.send(array('f', np.array([-10.] * self.dof).tolist()))
@@ -285,7 +305,6 @@ if __name__ == '__main__':
     parser.add_argument('--algo', type=str)
     parser.add_argument('--policy', type=str)
     parser.add_argument('--batch', type=str, default='/home/robot/Desktop/processed_bc_data/output.hdf5')
-    parser.add_argument('--control', type=str, default = 'osc')
     args = parser.parse_args()
 
 
@@ -330,7 +349,7 @@ if __name__ == '__main__':
             config.train.data = args.batch
             policy = BehavioralCloningAlgo(config)
             policy._prepare_for_test_rollouts(args.policy)
-            env = RealSawyerLift(controller=args.control)
+            env = RealSawyerLift()
 
 
         elif args.algo == "lmp":
@@ -339,7 +358,9 @@ if __name__ == '__main__':
             config.train.data=args.batch
             policy = LatentMotorPlansAlgo(config)
             policy._prepare_for_test_rollouts(args.policy)
-            env = RealSawyerLift(controller=args.control)
+            env = RealSawyerLift()
+
+            goal_inds = list(range(len(states_seq)))[self.config.train.seq_length :: self.config.train.seq_length]
 
         else:
             env = RCANRealSawyerLift(restore_rcan, rcan_kwargs, env_kwargs)
@@ -356,6 +377,10 @@ if __name__ == '__main__':
             #for n in range(20):
             if args.algo=='bc':
                 obs, rew, done, info = env.step(policy.forward(obs['proprio']))
+
+            elif args.algo=='lmp':
+                obs, rew, done, info = env.step(policy.forward(obs['proprio']))
+
             else:
                 
                 print(obs)
