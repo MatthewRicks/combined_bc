@@ -508,11 +508,20 @@ class Model(object):
       # ResNet does an Average Pooling layer over pool_size,
       # but that is the same as doing a reduce_mean. We do a reduce_mean
       # here because it performs better than AveragePooling2D.
+      
+
+      """
       axes = [2, 3] if self.data_format == 'channels_first' else [1, 2]
-      inputs = tf.reduce_mean(input_tensor=inputs, axis=axes, keepdims=True)
+      inputs = tf.reduce_mean(input_tensor=inputs, axis=axes, keepdims=True) # might need 
       inputs = tf.identity(inputs, 'final_reduce_mean')
 
       inputs = tf.squeeze(inputs, axes)
       inputs = tf.layers.dense(inputs=inputs, units=self.num_classes)
+      """
+      # print(inputs)
+      inputs = tf.contrib.layers.spatial_softmax(inputs)
+      # print(inputs)
+      # exit()
+
       inputs = tf.identity(inputs, 'final_dense')
       return inputs
