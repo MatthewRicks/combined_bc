@@ -433,7 +433,6 @@ if __name__ == '__main__':
             obs_seq, _, _, _, _, _, _ = policy.memory.get_trajectory_at_index(-1)
             goal_inds = list(range(len(obs_seq)))[policy.config.train.seq_length :: policy.config.train.seq_length]
             goal_inds.append(-1)
-            env = RealSawyerLift()
 
         else:
             env = RCANRealSawyerLift(restore_rcan, rcan_kwargs, env_kwargs={'use_image':args.image,
