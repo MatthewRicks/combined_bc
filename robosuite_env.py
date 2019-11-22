@@ -50,7 +50,7 @@ PORT_LOW = 7000
 
 class RealSawyerLift(object):
 
-    def __init__(self, control_freq=20, horizon=1000, camera_height=256,
+    def __init__(self, control_freq=20, horizon=1000, camera_height=256,grip_thresh=.25,
                  camera_width=256, use_image=False, use_proprio=False, port1=None, joint_proprio=True):
 
         self.joint_proprio = joint_proprio
@@ -65,18 +65,20 @@ class RealSawyerLift(object):
 
         self.control_timestep = 1. / self.ctrl_freq
         self.is_py2 = sys.version_info[0] < 3
-        self.gripper_state = 0 # 0 == open 1 == closed
+        self.gripper_closed = 0 # 0 = open 1 = closed
         self.timestep = 0
         self.done = False
         self.has_object_obs = False
         self.data_size = 96000
 
+        self.grip_thresh=grip_thresh
         self.sawyer_interface = None
         self.camera = None
 
         #np.random.seed(int(time.time()))
         self.port1 = port1 #np.random.choice(range(PORT_LOW, PORT_HIGH))
-        self.port2 = self.port1 + 1
+        self.port2 = self.port1 + 1        
+        self.debounce = 0  # make sure the gripper doesnt toggle too quickly
 
         self.config = make_config('RealSawyerDemoServerConfig')
         self.config.infer_settings()
@@ -95,9 +97,10 @@ class RealSawyerLift(object):
         """
         Exits on ctrl+C
         """
-        if self.is_py2 and self.controller=='opspace':
-            self.osc_controller.reset_flag.publish(True)
-
+        if self.is_py2:
+            self.sawyer_interface.open_gripper()
+            if self.controller=='opspace':
+                self.osc_controller.reset_flag.publish(True)
 
     def send(self, data):
         #self.close()
@@ -164,8 +167,9 @@ class RealSawyerLift(object):
         self.timestep = 0
 
         if self.is_py2:
-            self.sawyer_interface.reset()
             self.sawyer_interface.open_gripper()
+            self.sawyer_interface.reset()
+            time.sleep(1)
             # Successful Reset
             self.send(array('f', np.array([SUCCESS] * self.dof).tolist()))
             return
@@ -236,12 +240,21 @@ class RealSawyerLift(object):
             elif self.controller == 'opspace':
                 self.osc_controller.send_action(action[:-1])
 
-            if action[-1] > 0 and not self.gripper_state:
-                self.sawyer_interface.close_gripper()
-                self.gripper_state = 1
-            elif not action[-1] < 0. and self.gripper_state:
-                self.sawyer_interface.open_gripper()
-                self.gripper_state = 0
+            if self.debounce:
+                self.debounce-=1
+            else:
+                if self.gripper_closed:
+                    if abs(action[-1]) < 1-self.grip_thresh:
+                        self.sawyer_interface.open_gripper()
+                        self.gripper_closed=0
+                        self.debounce=5
+                        print('open gripper')
+                else:
+                    if abs(action[-1])>self.grip_thresh:
+                        self.sawyer_interface.close_gripper()
+                        self.gripper_closed=1
+                        self.debounce=5
+                        print('close gripper')
 
         else:
             # send to py2
@@ -269,6 +282,7 @@ class RealSawyerLift(object):
 
         # TODO: This should not be executed here if we are using RCAN *****
         # TODO: we should use time.time() from before _pre_action
+
         end_time = time.time() + self.control_timestep
         while time.time() < end_time:
             time.sleep(0.01)
@@ -286,6 +300,7 @@ class RealSawyerLift(object):
 
     def close(self):
         if self.is_py2:
+            self.sawyer_interface.open_gripper()
             self.sawyer_interface.reset()
         else:
             self.camera.release()
@@ -347,13 +362,18 @@ class RCANRealSawyerLift(RealSawyerLift):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', type=str)
-    parser.add_argument('--algo', type=str)
-    parser.add_argument('--policy', type=str)
-    parser.add_argument('--batch', type=str, default='/home/robot/Desktop/processed_bc_data/output.hdf5')
     parser.add_argument('--proprio', action='store_true')
     parser.add_argument('--image', action='store_true')
     parser.add_argument('--port1', type=int, required=True)
+    parser.add_argument('--mode', type=str, required=True, choices={'penv', 'py36'})
+    parser.add_argument('--algo', type=str, choices={'bc', 'lmp', 'rcan'}, help='choose which algorithm to use (py36)')
+    parser.add_argument('--policy', type=str, help='path to trained policy (py36)')
+
+    parser.add_argument('--batch', type=str, default='/home/robot/Desktop/processed_bc_data/output.hdf5',
+                            help='Default is output.hdf5 in processed_bc_data (py36)')
+
+    parser.add_argument('--ctrl_freq', type=int, default=10, 
+                            help='Set the control frequency. (py36)')
     args = parser.parse_args()
 
 
@@ -399,8 +419,7 @@ if __name__ == '__main__':
             config.train.data = args.batch
             policy = BehavioralCloningAlgo(config)
             policy._prepare_for_test_rollouts(args.policy)
-            env = RealSawyerLift(use_image=args.image, use_proprio=args.proprio, joint_proprio=False)
-
+            env = RealSawyerLift(control_freq=args.ctrl_freq, use_image=args.image, use_proprio=args.proprio, joint_proprio=False)
 
         elif args.algo == "lmp":
             assert args.policy is not None, 'Need to specify the path to the policy.'
@@ -408,9 +427,13 @@ if __name__ == '__main__':
             config.train.data=args.batch
             policy = LatentMotorPlansAlgo(config)
             policy._prepare_for_test_rollouts(args.policy)
-            env = RealSawyerLift(use_image=args.image, use_proprio=args.proprio, joint_proprio=False)
 
-            goal_inds = list(range(len(states_seq)))[self.config.train.seq_length :: self.config.train.seq_length]
+            env = RealSawyerLift(control_freq=args.ctrl_freq, use_image=args.image, use_proprio=args.proprio, joint_proprio=False)
+
+            obs_seq, _, _, _, _, _, _ = policy.memory.get_trajectory_at_index(-1)
+            goal_inds = list(range(len(obs_seq)))[policy.config.train.seq_length :: policy.config.train.seq_length]
+            goal_inds.append(-1)
+            env = RealSawyerLift()
 
         else:
             env = RCANRealSawyerLift(restore_rcan, rcan_kwargs, env_kwargs={'use_image':args.image,
@@ -423,14 +446,32 @@ if __name__ == '__main__':
             policy = load_model(policy_kwargs)
 
         obs = env.reset()
-        while True:
-            #for n in range(20):
+
+        run_loop = True
+        while run_loop:
             if args.algo=='bc':
-                obs, rew, done, info = env.step(policy.forward(obs['proprio']))
+                action = policy.forward(obs['proprio'])
+                num_actions = np.shape(action)[0]/7
+                for i in range(int(num_actions)):
+                    ac = action[i*7:(i+1)*7]
+                    obs, rew, done, info = env.step(ac)
+                    print('action: {}'.format(ac))
 
             elif args.algo=='lmp':
-                obs, rew, done, info = env.step(policy.forward(obs['proprio']))
+                for index in goal_inds:
+                    goal = obs_seq[index]
+                    for i in range(policy.config.train.seq_length):
+                        # start = time.time()
+                        t_obs = torch.from_numpy(np.expand_dims(obs['proprio'], axis=0)).float().to(policy.device)
+                        t_goal = torch.from_numpy(np.expand_dims(goal, axis=0)).float().to(policy.device)
 
+                        policy.start_control_loop(t_obs,t_goal)
+                        action = policy.act(obs=t_obs, goals=t_goal).cpu().detach().numpy().squeeze()
+                        print('action: {}'.format(action))
+                        obs, rew, done, info = env.step(action)
+                        # print('loop time: {}'.format(time.time()-start))
+
+                run_loop = False
             else:
 
                 start = time.time()
@@ -482,18 +523,16 @@ if __name__ == '__main__':
                 """
             #cv2.imshow('obs2', obs['pixel']['camera0'])
             #cv2.waitKey()
-
         env.close()
 
     def py2main():
-        RealSawyerLift(use_image=args.image, use_proprio=args.proprio, port1=args.port1, joint_proprio=args.algo not in ['bc', 'lmp']) #restore_rcan, rcan_kwargs, env_kwargs)
+        RealSawyerLift(grip_thresh=.1, use_image=args.image, use_proprio=args.proprio, port1=args.port1, joint_proprio=args.algo not in ['bc', 'lmp']) #restore_rcan, rcan_kwargs, env_kwargs)
 
     py36_location = '/home/robot/virtual_envs/py36/bin/python'
     penv_location = '/home/robot/virtual_envs/perlsenv/bin/python'
-
-    assert args.mode is not None, 'Specify the mode, either py36 or penv'
-    assert args.algo is not None, 'Specify which algorithm you are using'
+    
     if args.mode == 'py36':
+        assert args.algo is not None, 'Specify which algorithm you are using'
         py3main()
     elif args.mode == 'penv':
         py2main()
