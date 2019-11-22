@@ -42,6 +42,7 @@ from video_capture import VideoCapture
 RESET = -1000
 SUCCESS = -10000
 GET_POSE = -51515
+GET_PROPRIO = -9999
 CLOSE = -10
 
 PORT_HIGH = 7500
@@ -49,9 +50,10 @@ PORT_LOW = 7000
 
 class RealSawyerLift(object):
 
-    def __init__(self, control_freq=10, horizon=1000, camera_height=256,
-                 camera_width=256, use_image=False, use_proprio=False):
+    def __init__(self, control_freq=20, horizon=1000, camera_height=256,
+                 camera_width=256, use_image=False, use_proprio=False, port1=None, joint_proprio=True):
 
+        self.joint_proprio = joint_proprio
         self.ctrl_freq = control_freq
         self.t = horizon
         self.use_image = use_image
@@ -72,8 +74,8 @@ class RealSawyerLift(object):
         self.sawyer_interface = None
         self.camera = None
 
-        np.random.seed(time.time())
-        self.port1 = np.random.choice(range(PORT_LOW, PORT_HIGH))
+        #np.random.seed(int(time.time()))
+        self.port1 = port1 #np.random.choice(range(PORT_LOW, PORT_HIGH))
         self.port2 = self.port1 + 1
 
         self.config = make_config('RealSawyerDemoServerConfig')
@@ -98,7 +100,6 @@ class RealSawyerLift(object):
 
 
     def send(self, data):
-        # print('DATA SIZE ***************', sys.getsizeof(data))
         #self.close()
         #exit()
         self.bridge.send(data)
@@ -116,8 +117,25 @@ class RealSawyerLift(object):
             return True
         elif data[0] == GET_POSE and data[3] == GET_POSE and data[-1] == GET_POSE:
             pose = self.sawyer_interface.ee_pose
-            pose = self.sawyer_interface.pose_endpoint_transform(pose, des_endpoint='right_hand', curr_endpoint='right_gripper_tip')
+            pose = self.sawyer_interface.pose_endpoint_transform(pose, des_endpoint='right_hand',
+                                                                 curr_endpoint='right_gripper_tip')
             pose.append(self.sawyer_interface._gripper.get_position())
+            self.send(array('f', pose))
+        elif data[0] == GET_PROPRIO and data[3] == GET_PROPRIO and data[-1] == GET_PROPRIO:
+            joint_pos = np.array(self.sawyer_interface.q)
+            joint_vel = np.array(self.sawyer_interface.dq)
+
+            gripper_pos = np.array(self.sawyer_interface._gripper.get_position())
+            
+            ee_pose = self.sawyer_interface.ee_pose
+            ee_pose = np.array(self.sawyer_interface.pose_endpoint_transform(ee_pose, des_endpoint='right_hand',
+                                                                    curr_endpoint='right_gripper_tip'))
+
+            print(joint_pos.shape, joint_vel.shape, gripper_pos.shape, ee_pose.shape)
+            pose = np.concatenate([
+                np.sin(joint_pos), np.cos(joint_pos), joint_vel, [gripper_pos], [-gripper_pos], ee_pose 
+            ])
+            print(pose)
             self.send(array('f', pose))
         elif data[0] == CLOSE and data[3] == CLOSE and data[-1] == CLOSE:
             self.close()
@@ -181,7 +199,10 @@ class RealSawyerLift(object):
         return frame
 
     def _get_proprio(self):
-        self.send(array('f', np.array([GET_POSE]*self.dof).tolist()))
+        if self.joint_proprio:
+            self.send(array('f', np.array([GET_PROPRIO]*self.dof).tolist()))
+        else:
+            self.send(array('f', np.array([GET_POSE]*self.dof).tolist()))
         data = self.bridge.recieve()
         proprio = array('f')
         proprio.fromstring(data)
@@ -215,10 +236,10 @@ class RealSawyerLift(object):
             elif self.controller == 'opspace':
                 self.osc_controller.send_action(action[:-1])
 
-            if action[-1] > 0.25 and not self.gripper_state:
+            if action[-1] > 0 and not self.gripper_state:
                 self.sawyer_interface.close_gripper()
                 self.gripper_state = 1
-            elif not action[-1] < 0.25 and self.gripper_state:
+            elif not action[-1] < 0. and self.gripper_state:
                 self.sawyer_interface.open_gripper()
                 self.gripper_state = 0
 
@@ -246,9 +267,12 @@ class RealSawyerLift(object):
 
         self._apply_action(action)
 
+        # TODO: This should not be executed here if we are using RCAN *****
+        # TODO: we should use time.time() from before _pre_action
         end_time = time.time() + self.control_timestep
         while time.time() < end_time:
-            NotImplemented
+            time.sleep(0.01)
+            #NotImplemented
 
         return self._get_observation(), 0., False, {}
 
@@ -284,16 +308,11 @@ class RCANRealSawyerLift(RealSawyerLift):
             super(RCANRealSawyerLift, self).__init__(**env_kwargs)
 
     def _process_rcan(self, img):
-        print('img shape', img.shape)
-
-        #img = self.rcan.forward(torch.Tensor(img).cuda()).contiguous().detach().cpu().numpy()
-        print('rcan img shape', img.shape)
+        
+        img = self.rcan.forward(torch.Tensor(img).cuda()).contiguous().detach().cpu().numpy()
         img = np.transpose(img[0, :3, ...], (1,2,0))
-        print('1', img.shape)
         img = cv2.resize(img, (84, 84))
-        print('2', img.shape)
         img = np.transpose(img, (2, 0, 1))
-        print (img.shape)
         return img  # 1x3x84x84
 
     def step(self, action):
@@ -303,9 +322,14 @@ class RCANRealSawyerLift(RealSawyerLift):
             obs, rew, done, info = super(RCANRealSawyerLift, self).step(action)
 
         img = obs['image']
-        img = self._process_rcan(img)
+        img = (self._process_rcan(img) + 1.) / 2.
 
-        return img, rew, done, info
+        if 'proprio' in obs:
+            di = {'pixel': {'camera0': img}, 'low_dim': {'robot_state': obs['proprio']}}
+        else:
+            di = {'pixel': {'camera0': img}}
+        
+        return di, rew, done, info
 
     def reset(self):
         d = super(RCANRealSawyerLift, self).reset()
@@ -313,7 +337,12 @@ class RCANRealSawyerLift(RealSawyerLift):
         img = d['image']
         img = self._process_rcan(img)
 
-        return img
+        if 'proprio' in d:
+            di = {'pixel': {'camera0': img}, 'low_dim': {'robot_state': d['proprio']}}
+        else:
+            di = {'pixel': {'camera0': img}}
+        
+        return di
 
 
 if __name__ == '__main__':
@@ -324,6 +353,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch', type=str, default='/home/robot/Desktop/processed_bc_data/output.hdf5')
     parser.add_argument('--proprio', action='store_true')
     parser.add_argument('--image', action='store_true')
+    parser.add_argument('--port1', type=int, required=True)
     args = parser.parse_args()
 
 
@@ -347,11 +377,12 @@ if __name__ == '__main__':
 
     def restore_rcan(*args, **kwargs):
         return torch.load('/home/robot/andrewk/pytorch-RCAN/eval_net_G.pth').eval()
-        #return DummyRCAN()
+        #return torch.load('/home/robot/andrewk/pytorch-RCAN/adpativeG.pth').eval()
+
 
     def load_model(*args, **kwargs):
-        model = restore_model('.', 'learner.19000.ckpt')
-        configs = restore_config('./config.yml')
+        model = restore_model('./policy_ckpts/joint_vel_NEW_rnd_pos_rot_black', 'learner.64000.ckpt') # '../jonathan/', 'learner.19000.ckpt')
+        configs = restore_config('./policy_ckpts/joint_vel_NEW_rnd_pos_rot_black/config.yml') # ../jonathan/config.yml') #
         session_config, learner_config, env_config = \
             configs.session_config, configs.learner_config, configs.env_config
         agent = restore_agent(PPOAgent, learner_config, env_config, session_config, False)
@@ -368,7 +399,7 @@ if __name__ == '__main__':
             config.train.data = args.batch
             policy = BehavioralCloningAlgo(config)
             policy._prepare_for_test_rollouts(args.policy)
-            env = RealSawyerLift(use_image=args.image, use_proprio=args.proprio)
+            env = RealSawyerLift(use_image=args.image, use_proprio=args.proprio, joint_proprio=False)
 
 
         elif args.algo == "lmp":
@@ -377,22 +408,21 @@ if __name__ == '__main__':
             config.train.data=args.batch
             policy = LatentMotorPlansAlgo(config)
             policy._prepare_for_test_rollouts(args.policy)
-            env = RealSawyerLift(use_image=args.image, use_proprio=args.proprio)
+            env = RealSawyerLift(use_image=args.image, use_proprio=args.proprio, joint_proprio=False)
 
             goal_inds = list(range(len(states_seq)))[self.config.train.seq_length :: self.config.train.seq_length]
 
         else:
             env = RCANRealSawyerLift(restore_rcan, rcan_kwargs, env_kwargs={'use_image':args.image,
-                                                                            'use_proprio':args.proprio})
+                                                                            'use_proprio':args.proprio, 'port1': args.port1,
+                                                                            'joint_proprio': True})
 
             config = PPO_DEFAULT_ENV_CONFIG
             config.pixel_input = True
             #env = RobosuiteWrapper(env, config)
-
             policy = load_model(policy_kwargs)
 
         obs = env.reset()
-        # print(obs)
         while True:
             #for n in range(20):
             if args.algo=='bc':
@@ -403,11 +433,13 @@ if __name__ == '__main__':
 
             else:
 
-                print(obs)
-                obs = obs[:,::-1].copy() #* (255. / 2.) + (255. / 2.)#np.flip(obs, 0).copy()
+                start = time.time()
+
+                
+                o = obs['pixel']['camera0'][:,::-1].copy() * 255. #np.flip(obs, 0).copy()
                 #obs = cv2.cvtColor(obs, cv2.COLOR_BGR2RGB)
 
-                processed = obs.copy() #env._get_observation()
+                processed = o.copy() #env._get_observation()
                 processed = np.transpose(processed, (1,2,0))
 
                 #processed = env._process_rcan(raw_obs['image']).numpy()
@@ -417,14 +449,15 @@ if __name__ == '__main__':
                 #processed = processed.astype(np.uint8)
                 #processed = cv2.cvtColor(processed, cv2.COLOR_RGB2BGR)
                 cv2.imshow('obs', processed)
-                cv2.waitKey(0)
-
-
-                obs = torch.Tensor(obs)
-                a = policy.act({'pixel': {'camera0': obs}})
-
-                print(a)
-
+                cv2.waitKey(1)
+                
+                #print(obs)
+                #obs = torch.Tensor(obs)
+                start0 = time.time()
+                a = policy.act(obs) #{'pixel': {'camera0': obs}})
+                print('policy time', time.time() - start0)
+                #print(a)
+                
                 """
                 str_a = ''
                 for aa in a:
@@ -432,7 +465,11 @@ if __name__ == '__main__':
                 str_a = str_a[:-1]
                 print(str_a)
                 """
-                obs, rew, done, info = env.step(a)
+
+                start2 = time.time()
+                obs, rew, done, info = env.step(a / 2.)
+                print('step time', time.time() - start2)
+                print('time', time.time() - start)
 
                 """
                 raw_obs = env._get_observation()
@@ -449,7 +486,7 @@ if __name__ == '__main__':
         env.close()
 
     def py2main():
-        RealSawyerLift() #restore_rcan, rcan_kwargs, env_kwargs)
+        RealSawyerLift(use_image=args.image, use_proprio=args.proprio, port1=args.port1, joint_proprio=args.algo not in ['bc', 'lmp']) #restore_rcan, rcan_kwargs, env_kwargs)
 
     py36_location = '/home/robot/virtual_envs/py36/bin/python'
     penv_location = '/home/robot/virtual_envs/perlsenv/bin/python'
