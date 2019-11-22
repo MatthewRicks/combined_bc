@@ -179,8 +179,8 @@ class RealSawyerLift(object):
     def _get_observation(self):
         start = time.time()
         di = {}
-        # img = self._get_image()
-        # di['image'] = self._process_image(img)
+        img = self._get_image()
+        di['image'] = self._process_image(img)
         di['proprio'] = self._get_proprio()
         # print('Observation retrieval time: {}'.format(time.time()-start))
         return di
