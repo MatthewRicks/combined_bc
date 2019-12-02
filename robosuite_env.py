@@ -14,6 +14,7 @@ except ImportError:
     from batchRL.algo import *
     from batchRL.config import *
     import torch
+    from gama import GAMA
     try:
         from surreal.main.rollout import restore_agent, restore_model, restore_config
         from surreal.env.wrapper import RobosuiteWrapper
@@ -33,9 +34,9 @@ import time
 
 try:
     from .python_bridge import PythonBridge
+    
 except:
     from python_bridge import PythonBridge
-
 from video_capture import VideoCapture
 
 
@@ -86,6 +87,7 @@ class RealSawyerLift(object):
         self.config.infer_settings()
 
         self.controller = self.config.controller.mode
+
 
         if self.is_py2:
             self.bridge = PythonBridge(self.port1, self.port2, self.data_size)
@@ -138,9 +140,10 @@ class RealSawyerLift(object):
 
             print(joint_pos.shape, joint_vel.shape, gripper_pos.shape, ee_pose.shape)
             pose = np.concatenate([
-                np.sin(joint_pos), np.cos(joint_pos), joint_vel, [gripper_pos], [-gripper_pos], ee_pose
+                np.sin(joint_pos), np.cos(joint_pos), joint_vel, [-gripper_pos], [gripper_pos], ee_pose
             ])
-            print(pose)
+            print(joint_pos)
+            #print(pose)
             self.send(array('f', pose))
         elif data[0] == CLOSE and data[3] == CLOSE and data[-1] == CLOSE:
             self.close()
@@ -238,7 +241,7 @@ class RealSawyerLift(object):
     def _apply_action(self, action):
         if self.is_py2:
             if self.controller == 'velocity':
-                self.sawyer_interface.dq = action[:-1]
+                self.sawyer_interface.dq = action[:7]
 
             elif self.controller == 'opspace':
                 self.osc_controller.send_action(action[:-1])
@@ -312,24 +315,26 @@ class RealSawyerLift(object):
 
 class RCANRealSawyerLift(RealSawyerLift):
 
-    def __init__(self, rcan_restore_func, rcan_kwargs, env_kwargs):
+    def __init__(self, rcan_restore_func, rcan_kwargs, env_kwargs, no_rcan=False):
 
         rcan_kwargs = {} if not rcan_kwargs else rcan_kwargs
         self.rcan = rcan_restore_func(**rcan_kwargs)
+        self.no_rcan = no_rcan
 
         env_kwargs = {} if not env_kwargs else env_kwargs
 
         try:
-            super(self).__init__(**env_kwargs, do_sleep=False)
+            super(self).__init__(do_sleep=False, **env_kwargs)
         except TypeError:
-            super(RCANRealSawyerLift, self).__init__(**env_kwargs, do_sleep=False)
+            super(RCANRealSawyerLift, self).__init__(do_sleep=False,**env_kwargs)
 
     def _process_rcan(self, img):
 
-        img = self.rcan.forward(torch.Tensor(img).cuda()).contiguous().detach().cpu().numpy()
-        img = np.transpose(img[0, :3, ...], (1,2,0))
-        img = cv2.resize(img, (84, 84))
-        img = np.transpose(img, (2, 0, 1))
+        if not self.no_rcan:
+            img = self.rcan.forward(torch.Tensor(img).cuda()).contiguous().detach().cpu().numpy()
+            img = np.transpose(img[0, :3, ...], (1,2,0))
+            img = cv2.resize(img, (84, 84))
+            img = np.transpose(img, (2, 0, 1))
         return img  # 1x3x84x84
 
     def step(self, action):
@@ -340,10 +345,11 @@ class RCANRealSawyerLift(RealSawyerLift):
             obs, rew, done, info = super(RCANRealSawyerLift, self).step(action)
 
         img = obs['image']
-        img = (self._process_rcan(img) + 1.) / 2.
+        if not self.no_rcan:
+            img = (self._process_rcan(img) + 1.) / 2.
 
         if 'proprio' in obs:
-            di = {'pixel': {'camera0': img}, 'low_dim': {'robot_state': obs['proprio']}}
+            di = {'pixel': {'camera0': img}, 'low_dim': {'flat_inputs': obs['proprio']}}
         else:
             di = {'pixel': {'camera0': img}}
 
@@ -361,7 +367,7 @@ class RCANRealSawyerLift(RealSawyerLift):
         img = self._process_rcan(img)
 
         if 'proprio' in d:
-            di = {'pixel': {'camera0': img}, 'low_dim': {'robot_state': d['proprio']}}
+            di = {'pixel': {'camera0': img}, 'low_dim': {'flat_inputs': d['proprio']}}
         else:
             di = {'pixel': {'camera0': img}}
 
@@ -374,7 +380,7 @@ if __name__ == '__main__':
     parser.add_argument('--image', action='store_true', help='use --image if image observations will be used')
     parser.add_argument('--port1', type=int, required=True, help='The first port number to use for PythonBridge')
     parser.add_argument('--mode', type=str, required=True, choices={'penv', 'py36'})
-    parser.add_argument('--algo', type=str, choices={'bc', 'lmp', 'rcan'}, help='choose which algorithm to use (py36)')
+    parser.add_argument('--algo', type=str, choices={'bc', 'lmp', 'rcan', 'gama'}, help='choose which algorithm to use (py36)')
     parser.add_argument('--policy', type=str, help='path to trained policy (py36)')
 
     parser.add_argument('--batch', type=str, default='/home/robot/Desktop/processed_bc_data/output.hdf5',
@@ -444,6 +450,16 @@ if __name__ == '__main__':
             goal_inds = list(range(len(obs_seq)))[policy.config.train.seq_length :: policy.config.train.seq_length]
             goal_inds.append(-1)
 
+        elif args.algo =='gama':
+            assert args.policy is not None, 'Need to specify the path to the policy.'
+            env = RCANRealSawyerLift(restore_rcan, rcan_kwargs, env_kwargs={'use_image':args.image,
+                                                                            'use_proprio':args.proprio,
+                                                                            'port1': args.port1,
+                                                                            'control_freq': args.ctrl_freq},
+                                                                            no_rcan=True)
+
+            policy = GAMA()
+
         else:
             env = RCANRealSawyerLift(restore_rcan, rcan_kwargs, env_kwargs={'use_image':args.image,
                                                                             'use_proprio':args.proprio,
@@ -482,62 +498,52 @@ if __name__ == '__main__':
                         # print('loop time: {}'.format(time.time()-start))
 
                 run_loop = False
+
+            elif args.algo == 'gama':
+                start = time.time()
+
+                o = obs['pixel']['camera0'][0,:,::-1].copy() #np.flip(obs, 0).copy()
+
+                processed = o.copy() #env._get_observation()
+                processed = np.transpose(processed, (1,2,0))
+
+                processed = processed.astype(np.uint8) #* (255. / 2.) + (255. / 2.)
+
+                cv2.imshow('obs', processed)
+                cv2.waitKey(1)
+
+                a = policy.act(obs) #{'pixel': {'camera0': obs}})
+
+                obs, rew, done, info = env.step(a )
+
             else:
 
                 start = time.time()
 
                 o = obs['pixel']['camera0'][:,::-1].copy() * 255. #np.flip(obs, 0).copy()
-                #obs = cv2.cvtColor(obs, cv2.COLOR_BGR2RGB)
 
                 processed = o.copy() #env._get_observation()
                 processed = np.transpose(processed, (1,2,0))
-
-                #processed = env._process_rcan(raw_obs['image']).numpy()
                 processed = processed.astype(np.uint8) #* (255. / 2.) + (255. / 2.)
-                #processed = processed - (127.)
-                #processed /= 127.
-                #processed = processed.astype(np.uint8)
-                #processed = cv2.cvtColor(processed, cv2.COLOR_RGB2BGR)
+
                 cv2.imshow('obs', processed)
                 cv2.waitKey(1)
 
-                #print(obs)
-                #obs = torch.Tensor(obs)
                 start0 = time.time()
                 a = policy.act(obs) #{'pixel': {'camera0': obs}})
                 print('policy time', time.time() - start0)
-                #print(a)
-
-                """
-                str_a = ''
-                for aa in a:
-                    str_a += '{:0.3f},'.format(aa)
-                str_a = str_a[:-1]
-                print(str_a)
-                """
 
                 start2 = time.time()
                 obs, rew, done, info = env.step(a / 2.)
                 print('step time', time.time() - start2)
                 print('time', time.time() - start)
 
-                """
-                raw_obs = env._get_observation()
-                processed = env._process_rcan(raw_obs['image']).numpy()
-                processed = np.transpose(processed, (1,2,0)) * (255. / 2.) + (255. / 2.)
-                processed = processed.astype(np.uint8)
-                processed = cv2.cvtColor(processed, cv2.COLOR_RGB2BGR)
-                cv2.imshow('obs', processed)
-                cv2.waitKey(1)
-                """
-            #cv2.imshow('obs2', obs['pixel']['camera0'])
-            #cv2.waitKey()
         env.close()
 
     def py2main():
         # joint proprio must be set to true here if using surreal.
         RealSawyerLift(grip_thresh=.1, port1=args.port1,
-                       joint_proprio=args.algo not in ['bc', 'lmp'])
+                       joint_proprio=args.algo not in ['bc', 'lmp'], use_image=args.image, use_proprio=args.proprio)
 
     py36_location = '/home/robot/virtual_envs/py36/bin/python'
     penv_location = '/home/robot/virtual_envs/perlsenv/bin/python'
